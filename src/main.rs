@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use obfstr::{obfstmt, obfstr};
-use std::fs::{OpenOptions, create_dir, File};
+use std::fs::{OpenOptions, create_dir, File, read_to_string};
 use std::fs;
-use std::io::Write;
+use std::io::{Write, Read};
 use std::path::Path;
 use serde::{Serialize, Deserialize};
 use rand::{thread_rng, Rng};
@@ -10,7 +10,11 @@ use rand::distributions::Alphanumeric;
 use std::time::{SystemTime, UNIX_EPOCH};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce};
 use aes_gcm_siv::aead::{Aead, NewAead};
+use std::str;
 
+
+const CONFIG_FILE: &str = "config.toml";
+const PASSWORDS_DIRECTORY: &str = "passwords/";
 
 
 
@@ -73,7 +77,14 @@ enum SubCmd {
     /// Maximum length for a new password
     #[clap(long)]
     maximum: u32,
-  }
+  },
+
+  /// Password and username to fetch
+  FetchPassword {
+    /// Identifier
+    #[clap(short, long)]
+    identifier: String,
+  },
 }
 
 
@@ -90,10 +101,11 @@ fn main() {
   }
   
   match args.sub_cmd {
-    SubCmd::Initiate => initiate(),
+    SubCmd::Initiate => initialize(),
     SubCmd::AddPassword { identifier, username, password } => add_password(identifier, username, password),
     SubCmd::GenPassword => gen_password(),
-    SubCmd::ChangeConfig { minimum, maximum } => {}
+    SubCmd::ChangeConfig { minimum, maximum } => change_config(minimum, maximum),
+    SubCmd::FetchPassword { identifier } => fetch_password(identifier),
   }
 }
 
@@ -111,11 +123,11 @@ struct NewPasswordsConfig {
 }
 
 
-fn initiate() {
+fn initialize() {
   let config_file = OpenOptions::new()
     .write(true)
     .create_new(true)
-    .open("config.toml");
+    .open(CONFIG_FILE);
 
   if config_file.is_err() {
     panic!("config already exists");
@@ -131,13 +143,13 @@ fn initiate() {
   }).unwrap().as_bytes()).unwrap();
 
 
-  let passwords_path = Path::new("passwords");
+  let passwords_path = Path::new(PASSWORDS_DIRECTORY);
   if !passwords_path.exists() {
     create_dir(passwords_path).unwrap();
   }
 
 
-  println!("initiated");
+  println!("initialized");
 }
 
 fn add_password(identifier: String, username: String, new_password: String) {
@@ -158,7 +170,7 @@ fn add_password(identifier: String, username: String, new_password: String) {
 
 
   let identifier_path = {
-    let mut path = "passwords/".to_string();
+    let mut path = PASSWORDS_DIRECTORY.to_string();
     path.push_str(&*identifier);
     path
   };
@@ -174,13 +186,22 @@ fn add_password(identifier: String, username: String, new_password: String) {
     identifier_path.push_str("/.password");
     identifier_path
   };
+
+  let username_path = {
+    let mut identifier_path = identifier_path.clone();
+    identifier_path.push_str("/.username");
+    identifier_path
+  };
   
   create_dir(identifier_path).expect("this identifier already exists");
   let mut nonce_file = File::create(nonce_path).unwrap();
-  let mut password_path = File::create(password_path).unwrap();
+  let mut password_file = File::create(password_path).unwrap();
+  let mut username_file = File::create(username_path).unwrap();
 
   
   nonce_file.write_all(nonce_string.as_bytes()).unwrap();
+  password_file.write_all(&ciphertext).unwrap();
+  username_file.write_all(username.as_bytes()).unwrap();
   
 
 
@@ -189,7 +210,7 @@ fn add_password(identifier: String, username: String, new_password: String) {
 
 fn gen_password() {
   let config: Config = toml::from_str(
-    &fs::read_to_string("config.toml").expect("config does not exist")
+    &fs::read_to_string(CONFIG_FILE).expect("config does not exist")
   ).expect("config is invalid");
   
   let mut rand_string: String = thread_rng()
@@ -207,4 +228,75 @@ fn gen_password() {
   }
   
   println!("{}", rand_string);
+}
+
+fn change_config(minimum: u32, maximum: u32) {
+  assert!(maximum >= minimum);
+  
+  let mut config_file = OpenOptions::new()
+    .write(true)
+    .open(CONFIG_FILE)
+    .expect("config file does not exist");
+  let config_string = read_to_string(CONFIG_FILE).unwrap();
+
+  let mut config: Config = toml::from_str(&*config_string).expect("invalid config file");
+
+  config.new_passwords_config.new_password_min_length = minimum;
+  config.new_passwords_config.new_password_max_length = maximum;
+
+  config_file.write_all(toml::to_string(&config).unwrap().as_bytes()).unwrap();
+
+
+  println!("config changed");
+}
+
+fn fetch_password(identifier: String) {
+  
+  let identifier_path = {
+    let mut path = PASSWORDS_DIRECTORY.to_string();
+    path.push_str(&*identifier);
+    path
+  };
+
+  let nonce_path = {
+    let mut identifier_path = identifier_path.clone();
+    identifier_path.push_str("/.nonce");
+    identifier_path
+  };
+
+  let password_path = {
+    let mut identifier_path = identifier_path.clone();
+    identifier_path.push_str("/.password");
+    identifier_path
+  };
+
+  let username_path = {
+    let mut identifier_path = identifier_path.clone();
+    identifier_path.push_str("/.username");
+    identifier_path
+  };
+
+
+  let username = read_to_string(username_path).unwrap();
+  
+  let nonce = read_to_string(nonce_path).unwrap();
+
+  let mut password_bytes = Vec::new();
+  File::open(password_path).unwrap().read_to_end(&mut password_bytes).unwrap();
+
+
+  let mut buf = [0u8; 64];
+  let key = Key::from_slice(get_key(&mut buf).as_bytes());
+  let cipher = Aes256GcmSiv::new(key);
+  let nonce = Nonce::from_slice(nonce.as_bytes());
+  
+  let password = cipher.decrypt(nonce, password_bytes.as_ref()).expect("decryption failure");
+
+  let password = match str::from_utf8(&password) {
+    Ok(v) => v,
+    Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+  };
+  
+
+  println!("username:{}\npassword:{}", username, password);
 }
