@@ -1,0 +1,21 @@
+cargo-features = ["strip"]
+
+[package]
+name = "terminal_pw_manager"
+description = "manages and makes your passwords for you, on the terminal"
+authors = ["majorsopa"]
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "3.0.14", features = ["derive"] }
+rand = "0.8.4"
+aes-gcm-siv = "0.10.3"
+obfstr = "0.3.0"
+toml = "0.5.8"
+serde = { version = "1.0.136", features = ["derive"] }
+
+[profile.release]
+strip = true

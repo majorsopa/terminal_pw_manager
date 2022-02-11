@@ -1,0 +1,3 @@
+[new_passwords_config]
+new_password_min_length = 12
+new_password_max_length = 20
